@@ -1,0 +1,46 @@
+@import "tailwindcss";
+
+:root {
+  --background: #050f0e;
+  --surface: #0d1a18;
+  --surface-hover: #142522;
+  --border: #1d332f;
+  --foreground: #eafaf6;
+  --muted: #7fa39c;
+
+  --accent: #00e6c3;
+  --accent-foreground: #03211c;
+  --accent-soft: rgba(0, 230, 195, 0.14);
+  --accent-glow: rgba(0, 230, 195, 0.55);
+
+  /* Category colors are now user-defined (Category table) — this is only
+     for destructive actions (delete goal/category), not tied to any
+     specific category anymore. */
+  --danger: #fb5d3e;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-hover: var(--surface-hover);
+  --color-border: var(--border);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent-soft: var(--accent-soft);
+  --color-danger: var(--danger);
+
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+}
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--foreground);
+}
