@@ -3,6 +3,7 @@
 import { z } from "zod";
 import { prisma } from "./prisma";
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
 import { periodKeyFor, parseLocalDate } from "./dates";
 import { requireUserId } from "./auth";
 import type { Recurrence } from "@prisma/client";
@@ -15,11 +16,23 @@ async function assertCategoryOwned(categoryId: string, userId: string) {
   if (!category) throw new Error("Category not found");
 }
 
+// "1,3,5" -> [1,3,5]; ignores anything out of 0-6, dedupes, sorts. Only
+// meaningful for DAILY goals — WEEKLY/ONE_OFF always store [].
+function parseDaysOfWeek(raw: string | undefined): number[] {
+  if (!raw) return [];
+  const days = raw
+    .split(",")
+    .map((s) => Number(s))
+    .filter((n) => Number.isInteger(n) && n >= 0 && n <= 6);
+  return [...new Set(days)].sort((a, b) => a - b);
+}
+
 const createGoalSchema = z.object({
   title: z.string().trim().min(1).max(80),
   categoryId: z.string().min(1),
   recurrence: z.enum(["DAILY", "WEEKLY", "ONE_OFF"]),
   specificDate: z.string().optional(),
+  daysOfWeek: z.string().optional(),
 });
 
 export async function createGoal(formData: FormData) {
@@ -29,6 +42,7 @@ export async function createGoal(formData: FormData) {
     categoryId: formData.get("categoryId"),
     recurrence: formData.get("recurrence"),
     specificDate: formData.get("specificDate") || undefined,
+    daysOfWeek: formData.get("daysOfWeek") || undefined,
   });
 
   await assertCategoryOwned(parsed.categoryId, userId);
@@ -39,6 +53,7 @@ export async function createGoal(formData: FormData) {
       title: parsed.title,
       categoryId: parsed.categoryId,
       recurrence: parsed.recurrence,
+      daysOfWeek: parsed.recurrence === "DAILY" ? parseDaysOfWeek(parsed.daysOfWeek) : [],
       specificDate:
         parsed.recurrence === "ONE_OFF" && parsed.specificDate
           ? parseLocalDate(parsed.specificDate)
@@ -61,6 +76,7 @@ export async function updateGoal(formData: FormData) {
     categoryId: formData.get("categoryId"),
     recurrence: formData.get("recurrence"),
     specificDate: formData.get("specificDate") || undefined,
+    daysOfWeek: formData.get("daysOfWeek") || undefined,
   });
 
   await assertCategoryOwned(parsed.categoryId, userId);
@@ -73,6 +89,7 @@ export async function updateGoal(formData: FormData) {
       title: parsed.title,
       categoryId: parsed.categoryId,
       recurrence: parsed.recurrence,
+      daysOfWeek: parsed.recurrence === "DAILY" ? parseDaysOfWeek(parsed.daysOfWeek) : [],
       specificDate:
         parsed.recurrence === "ONE_OFF" && parsed.specificDate
           ? parseLocalDate(parsed.specificDate)
@@ -272,4 +289,79 @@ export async function removePartnership(partnershipId: string) {
   });
 
   revalidatePath("/");
+}
+
+// ---------- Onboarding ----------
+
+const onboardingGoalSchema = z.object({
+  title: z.string().trim().min(1).max(80),
+  recurrence: z.enum(["DAILY", "WEEKLY"]),
+  daysOfWeek: z.array(z.number().int().min(0).max(6)).default([]),
+});
+
+const onboardingCategorySchema = z.object({
+  name: z.string().trim().min(1).max(30),
+  color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+  goals: z.array(onboardingGoalSchema).min(1),
+});
+
+const completeOnboardingSchema = z.object({
+  categories: z.array(onboardingCategorySchema).min(1),
+  milestone: z
+    .object({
+      label: z.string().trim().min(1).max(60),
+      targetDate: z.string().min(1),
+    })
+    .nullable(),
+});
+
+export async function completeOnboarding(
+  input: z.infer<typeof completeOnboardingSchema>
+) {
+  const userId = await requireUserId();
+  const parsed = completeOnboardingSchema.parse(input);
+
+  await prisma.$transaction(async (tx) => {
+    for (const [order, category] of parsed.categories.entries()) {
+      const created = await tx.category.create({
+        data: { userId, name: category.name, color: category.color, order },
+      });
+      await tx.goal.createMany({
+        data: category.goals.map((g) => ({
+          userId,
+          categoryId: created.id,
+          title: g.title,
+          recurrence: g.recurrence,
+          daysOfWeek: g.recurrence === "DAILY" ? g.daysOfWeek : [],
+        })),
+      });
+    }
+
+    if (parsed.milestone) {
+      await tx.milestone.upsert({
+        where: { userId },
+        create: {
+          userId,
+          label: parsed.milestone.label,
+          targetDate: parseLocalDate(parsed.milestone.targetDate),
+        },
+        update: {
+          label: parsed.milestone.label,
+          targetDate: parseLocalDate(parsed.milestone.targetDate),
+        },
+      });
+    }
+
+    await tx.user.update({ where: { id: userId }, data: { onboardedAt: new Date() } });
+  });
+
+  revalidatePath("/");
+  redirect("/");
+}
+
+export async function skipOnboarding() {
+  const userId = await requireUserId();
+  await prisma.user.update({ where: { id: userId }, data: { onboardedAt: new Date() } });
+  revalidatePath("/");
+  redirect("/");
 }

@@ -5,8 +5,8 @@ import { format } from "date-fns";
 export type HeatmapDay = { date: string; ratio: number };
 export type MonthLabel = { weekIndex: number; label: string };
 
-// Denominator is "goals active right now," applied uniformly across the
-// whole window — same approximation streak.ts makes. Exact historical
+// Denominator is "goals due that weekday, right now" — same approximation
+// streak.ts makes for historical goal-set changes. Exact historical
 // accuracy would need to track the goal set as of each past day; not worth
 // it for a personal consistency view.
 export async function getHeatmapData(
@@ -16,25 +16,32 @@ export async function getHeatmapData(
 ): Promise<{ weeksGrid: HeatmapDay[][]; monthLabels: MonthLabel[] }> {
   const dailyGoals = await prisma.goal.findMany({
     where: { userId, recurrence: "DAILY", archivedAt: null },
-    select: { id: true },
+    select: { id: true, daysOfWeek: true },
   });
   const goalIds = dailyGoals.map((g) => g.id);
-  const denominator = goalIds.length;
 
   const start = new Date(now);
   start.setHours(0, 0, 0, 0);
-  const dayOfWeek = (start.getDay() + 6) % 7; // 0 = Monday
-  start.setDate(start.getDate() - dayOfWeek - (weeks - 1) * 7);
+  const startDow = (start.getDay() + 6) % 7; // 0 = Monday
+  start.setDate(start.getDate() - startDow - (weeks - 1) * 7);
 
-  const countByDay = new Map<string, number>();
-  if (denominator > 0) {
+  const completedByDay = new Map<string, Set<string>>();
+  if (goalIds.length > 0) {
     const completions = await prisma.completion.findMany({
       where: { goalId: { in: goalIds }, completed: true },
-      select: { periodKey: true },
+      select: { goalId: true, periodKey: true },
     });
     for (const c of completions) {
-      countByDay.set(c.periodKey, (countByDay.get(c.periodKey) ?? 0) + 1);
+      const set = completedByDay.get(c.periodKey) ?? new Set<string>();
+      set.add(c.goalId);
+      completedByDay.set(c.periodKey, set);
     }
+  }
+
+  function dueIdsFor(dow: number): string[] {
+    return dailyGoals
+      .filter((g) => g.daysOfWeek.length === 0 || g.daysOfWeek.includes(dow))
+      .map((g) => g.id);
   }
 
   const weeksGrid: HeatmapDay[][] = [];
@@ -49,10 +56,12 @@ export async function getHeatmapData(
     }
 
     const column: HeatmapDay[] = [];
-    for (let d = 0; d < 7; d++) {
+    for (let dow = 0; dow < 7; dow++) {
       const key = todayKey(cursor);
-      const count = countByDay.get(key) ?? 0;
-      const ratio = denominator > 0 ? Math.min(1, count / denominator) : 0;
+      const due = dueIdsFor(dow);
+      const completedSet = completedByDay.get(key) ?? new Set<string>();
+      const doneCount = due.filter((id) => completedSet.has(id)).length;
+      const ratio = due.length > 0 ? Math.min(1, doneCount / due.length) : 0;
       column.push({ date: key, ratio });
       cursor.setDate(cursor.getDate() + 1);
     }

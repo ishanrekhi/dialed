@@ -4,6 +4,7 @@ import { useState } from "react";
 import { updateGoal, archiveGoal } from "@/lib/actions";
 import { todayKey } from "@/lib/dates";
 import Modal from "./Modal";
+import DayOfWeekPicker from "./DayOfWeekPicker";
 import type { Recurrence } from "@prisma/client";
 
 type CategoryOption = { id: string; name: string };
@@ -13,6 +14,7 @@ type GoalDetail = {
   categoryId: string;
   recurrence: Recurrence;
   specificDate: Date | null;
+  daysOfWeek: number[];
 };
 
 export default function EditGoalModal({
@@ -27,6 +29,8 @@ export default function EditGoalModal({
   categories: CategoryOption[];
 }) {
   const [recurrence, setRecurrence] = useState<Recurrence>(goal.recurrence);
+  const [everyDay, setEveryDay] = useState(goal.daysOfWeek.length === 0);
+  const [days, setDays] = useState<number[]>(goal.daysOfWeek);
 
   return (
     <Modal open={open} onClose={onClose} title="Edit goal">
@@ -71,11 +75,33 @@ export default function EditGoalModal({
             onChange={(e) => setRecurrence(e.target.value as Recurrence)}
             className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none focus:border-accent"
           >
-            <option value="DAILY">Every day</option>
-            <option value="WEEKLY">Every week</option>
+            <option value="DAILY">Every day / certain days</option>
+            <option value="WEEKLY">Once a week (any day)</option>
             <option value="ONE_OFF">Just once, on a specific day</option>
           </select>
         </div>
+        {recurrence === "DAILY" && (
+          <div className="space-y-2">
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={everyDay}
+                onChange={(e) => setEveryDay(e.target.checked)}
+                className="h-4 w-4 accent-[var(--accent)]"
+              />
+              Every day
+            </label>
+            {!everyDay && (
+              <>
+                <DayOfWeekPicker value={days} onChange={setDays} />
+                {days.length === 0 && (
+                  <p className="text-xs text-danger">Pick at least one day.</p>
+                )}
+              </>
+            )}
+            <input type="hidden" name="daysOfWeek" value={everyDay ? "" : days.join(",")} />
+          </div>
+        )}
         {recurrence === "ONE_OFF" && (
           <div>
             <label className="text-xs text-muted">Date</label>
@@ -109,7 +135,8 @@ export default function EditGoalModal({
             </button>
             <button
               type="submit"
-              className="rounded-full bg-accent px-4 py-2 text-sm font-medium text-accent-foreground hover:opacity-90"
+              disabled={recurrence === "DAILY" && !everyDay && days.length === 0}
+              className="rounded-full bg-accent px-4 py-2 text-sm font-medium text-accent-foreground hover:opacity-90 disabled:opacity-50"
             >
               Save
             </button>

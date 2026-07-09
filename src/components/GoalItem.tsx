@@ -5,6 +5,7 @@ import { motion } from "framer-motion";
 import confetti from "canvas-confetti";
 import { hexToRgba } from "@/lib/color";
 import EditGoalModal from "./EditGoalModal";
+import { DAY_LABELS } from "./DayOfWeekPicker";
 import type { Recurrence } from "@prisma/client";
 
 const ACCENT_COLOR = "#00e6c3";
@@ -15,6 +16,7 @@ export type GoalRow = {
   category: { id: string; name: string; color: string };
   recurrence: Recurrence;
   specificDate: Date | null;
+  daysOfWeek: number[];
 };
 
 export default function GoalItem({
@@ -104,10 +106,17 @@ export default function GoalItem({
             </motion.svg>
           )}
         </motion.span>
-        <span
-          className={`flex-1 text-[15px] font-medium ${completed ? "text-muted line-through decoration-2" : "text-foreground"}`}
-        >
-          {goal.title}
+        <span className="flex-1 min-w-0">
+          <span
+            className={`block text-[15px] font-medium ${completed ? "text-muted line-through decoration-2" : "text-foreground"}`}
+          >
+            {goal.title}
+          </span>
+          {goal.daysOfWeek.length > 0 && (
+            <span className="block text-xs text-muted">
+              {goal.daysOfWeek.map((d) => DAY_LABELS[d]).join(", ")}
+            </span>
+          )}
         </span>
         <span
           className="shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold"
@@ -145,6 +154,7 @@ export default function GoalItem({
           categoryId: goal.category.id,
           recurrence: goal.recurrence,
           specificDate: goal.specificDate,
+          daysOfWeek: goal.daysOfWeek,
         }}
         categories={categories}
       />

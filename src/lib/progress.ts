@@ -1,6 +1,6 @@
 import { prisma } from "./prisma";
-import { todayKey, weekKey, periodKeyFor } from "./dates";
-import type { Category, Goal, Completion } from "@prisma/client";
+import { todayKey, weekKey, periodKeyFor, dayOfWeekIndex } from "./dates";
+import type { Category, Goal, Completion, Prisma } from "@prisma/client";
 
 export type GoalWithCompletion = Goal & { category: Category; completions: Completion[] };
 
@@ -15,13 +15,20 @@ export async function getActiveGoals(
 
   const tKey = todayKey(now);
   const wKey = weekKey(now);
+  const todayDow = dayOfWeekIndex(now);
+
+  const dailyFilter: Prisma.GoalWhereInput = {
+    recurrence: "DAILY",
+    OR: [{ daysOfWeek: { isEmpty: true } }, { daysOfWeek: { has: todayDow } }],
+  };
 
   return prisma.goal.findMany({
     where: {
       userId,
       archivedAt: null,
       OR: [
-        { recurrence: { in: ["DAILY", "WEEKLY"] } },
+        { recurrence: "WEEKLY" },
+        dailyFilter,
         { recurrence: "ONE_OFF", specificDate: { gte: dayStart, lt: dayEnd } },
       ],
     },

@@ -3,12 +3,21 @@
 import { useState } from "react";
 import { createGoal } from "@/lib/actions";
 import Modal from "./Modal";
+import DayOfWeekPicker from "./DayOfWeekPicker";
 
 type CategoryOption = { id: string; name: string };
 
 export default function NewGoalModal({ categories }: { categories: CategoryOption[] }) {
   const [open, setOpen] = useState(false);
   const [recurrence, setRecurrence] = useState<"DAILY" | "WEEKLY" | "ONE_OFF">("DAILY");
+  const [everyDay, setEveryDay] = useState(true);
+  const [days, setDays] = useState<number[]>([]);
+
+  function reset() {
+    setRecurrence("DAILY");
+    setEveryDay(true);
+    setDays([]);
+  }
 
   return (
     <>
@@ -24,7 +33,7 @@ export default function NewGoalModal({ categories }: { categories: CategoryOptio
           action={async (formData) => {
             await createGoal(formData);
             setOpen(false);
-            setRecurrence("DAILY");
+            reset();
           }}
           className="mt-4 space-y-4"
         >
@@ -61,11 +70,33 @@ export default function NewGoalModal({ categories }: { categories: CategoryOptio
               onChange={(e) => setRecurrence(e.target.value as typeof recurrence)}
               className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none focus:border-accent"
             >
-              <option value="DAILY">Every day</option>
-              <option value="WEEKLY">Every week</option>
+              <option value="DAILY">Every day / certain days</option>
+              <option value="WEEKLY">Once a week (any day)</option>
               <option value="ONE_OFF">Just once, on a specific day</option>
             </select>
           </div>
+          {recurrence === "DAILY" && (
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={everyDay}
+                  onChange={(e) => setEveryDay(e.target.checked)}
+                  className="h-4 w-4 accent-[var(--accent)]"
+                />
+                Every day
+              </label>
+              {!everyDay && (
+                <>
+                  <DayOfWeekPicker value={days} onChange={setDays} />
+                  {days.length === 0 && (
+                    <p className="text-xs text-danger">Pick at least one day.</p>
+                  )}
+                </>
+              )}
+              <input type="hidden" name="daysOfWeek" value={everyDay ? "" : days.join(",")} />
+            </div>
+          )}
           {recurrence === "ONE_OFF" && (
             <div>
               <label className="text-xs text-muted">Date</label>
@@ -88,7 +119,8 @@ export default function NewGoalModal({ categories }: { categories: CategoryOptio
             </button>
             <button
               type="submit"
-              className="rounded-full bg-accent px-4 py-2 text-sm font-medium text-accent-foreground hover:opacity-90"
+              disabled={recurrence === "DAILY" && !everyDay && days.length === 0}
+              className="rounded-full bg-accent px-4 py-2 text-sm font-medium text-accent-foreground hover:opacity-90 disabled:opacity-50"
             >
               Add
             </button>

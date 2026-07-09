@@ -1,3 +1,4 @@
+import { redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { requireUserId } from "@/lib/auth";
 import { getActiveGoals, isGoalComplete, summarize } from "@/lib/progress";
@@ -18,6 +19,12 @@ import Heatmap from "@/components/Heatmap";
 
 export default async function HomePage() {
   const userId = await requireUserId();
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { onboardedAt: true },
+  });
+  if (!user?.onboardedAt) redirect("/onboarding");
 
   const [goals, streak, milestone, categories] = await Promise.all([
     getActiveGoals(userId),
@@ -52,6 +59,7 @@ export default async function HomePage() {
     category: g.category,
     recurrence: g.recurrence,
     specificDate: g.specificDate,
+    daysOfWeek: g.daysOfWeek,
   });
 
   const categoryRows = categories.map((c) => ({
