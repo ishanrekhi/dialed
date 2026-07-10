@@ -152,7 +152,7 @@ export default async function HomePage() {
       </div>
 
       <div className="mt-10">
-        <Heatmap userId={userId} />
+        <Heatmap userId={userId} currentStreak={streak} />
       </div>
     </div>
   );

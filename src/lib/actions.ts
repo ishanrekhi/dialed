@@ -4,7 +4,7 @@ import { z } from "zod";
 import { prisma } from "./prisma";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { periodKeyFor, parseLocalDate } from "./dates";
+import { periodKeyFor, parseLocalDate, dayOfWeekIndex, todayKey } from "./dates";
 import { requireUserId } from "./auth";
 import type { Recurrence } from "@prisma/client";
 
@@ -100,7 +100,11 @@ export async function updateGoal(formData: FormData) {
   revalidatePath("/");
 }
 
-export async function toggleCompletion(goalId: string, recurrence: Recurrence) {
+export async function toggleCompletion(
+  goalId: string,
+  recurrence: Recurrence,
+  atDate?: string
+) {
   const userId = await requireUserId();
 
   const goal = await prisma.goal.findFirst({
@@ -109,7 +113,7 @@ export async function toggleCompletion(goalId: string, recurrence: Recurrence) {
   });
   if (!goal) return;
 
-  const periodKey = periodKeyFor(recurrence);
+  const periodKey = periodKeyFor(recurrence, atDate ? parseLocalDate(atDate) : new Date());
 
   const existing = await prisma.completion.findUnique({
     where: { goalId_periodKey: { goalId, periodKey } },
@@ -122,6 +126,46 @@ export async function toggleCompletion(goalId: string, recurrence: Recurrence) {
   }
 
   revalidatePath("/");
+}
+
+export type DayDetailGoal = {
+  id: string;
+  title: string;
+  category: { name: string; color: string };
+  completed: boolean;
+};
+
+// Goals due on a given calendar date, using the *current* goal set (same
+// approximation streak/heatmap make — we don't track historical goal-set
+// changes) — matches exactly what that date's heatmap cell ratio is based
+// on: DAILY goals filtered by day-of-week. WEEKLY/ONE_OFF are intentionally
+// excluded so the panel's count always matches the cell it was opened from.
+export async function getDayDetail(dateStr: string): Promise<DayDetailGoal[]> {
+  const userId = await requireUserId();
+  const date = parseLocalDate(dateStr);
+  const dow = dayOfWeekIndex(date);
+  const key = todayKey(date);
+
+  const goals = await prisma.goal.findMany({
+    where: {
+      userId,
+      archivedAt: null,
+      recurrence: "DAILY",
+      OR: [{ daysOfWeek: { isEmpty: true } }, { daysOfWeek: { has: dow } }],
+    },
+    include: {
+      category: { select: { name: true, color: true } },
+      completions: { where: { periodKey: key, completed: true } },
+    },
+    orderBy: { createdAt: "asc" },
+  });
+
+  return goals.map((g) => ({
+    id: g.id,
+    title: g.title,
+    category: g.category,
+    completed: g.completions.length > 0,
+  }));
 }
 
 export async function archiveGoal(goalId: string) {
