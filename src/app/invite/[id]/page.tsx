@@ -1,7 +1,8 @@
 import { redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { requireUserId } from "@/lib/auth";
-import { respondToInvite } from "@/lib/actions";
+import { joinGroup } from "@/lib/actions";
+import { MAX_GROUP_SIZE } from "@/lib/group";
 
 function Shell({ children }: { children: React.ReactNode }) {
   return (
@@ -21,57 +22,74 @@ export default async function InvitePage({
   const userId = await requireUserId();
   const { id } = await params;
 
-  const invite = await prisma.partnership.findUnique({
+  const invite = await prisma.groupInvite.findUnique({
     where: { id },
-    include: { requester: { select: { name: true, email: true } } },
+    include: {
+      creator: { select: { name: true, email: true } },
+      group: { select: { name: true, _count: { select: { members: true } } } },
+    },
   });
 
-  if (!invite || invite.status === "DECLINED") {
+  if (!invite) {
     return (
       <Shell>
-        <p className="font-medium">This invite doesn&apos;t exist or was declined.</p>
-        <p className="mt-2 text-sm text-muted">Ask your partner to send a new link.</p>
+        <p className="font-medium">This invite doesn&apos;t exist.</p>
+        <p className="mt-2 text-sm text-muted">Ask for a new link.</p>
       </Shell>
     );
   }
 
-  if (invite.status === "ACCEPTED") {
+  if (invite.usedBy) {
     return (
       <Shell>
         <p className="font-medium">This invite has already been used.</p>
-        <a href="/" className="mt-3 inline-block text-sm text-accent hover:underline">
-          Back to your board
+        <a href="/social" className="mt-3 inline-block text-sm text-accent hover:underline">
+          Back to Social
         </a>
       </Shell>
     );
   }
 
-  if (invite.requesterId === userId) {
+  if (invite.createdBy === userId) {
     return (
       <Shell>
         <p className="font-medium">This is your own invite link.</p>
-        <p className="mt-2 text-sm text-muted">
-          Send it to the person you want as your accountability partner.
-        </p>
-        <a href="/" className="mt-3 inline-block text-sm text-accent hover:underline">
-          Back to your board
+        <p className="mt-2 text-sm text-muted">Send it to someone you want in your group.</p>
+        <a href="/social" className="mt-3 inline-block text-sm text-accent hover:underline">
+          Back to Social
         </a>
       </Shell>
     );
   }
 
-  const requesterName = invite.requester.name ?? invite.requester.email ?? "Someone";
+  const existingMembership = await prisma.groupMembership.findFirst({ where: { userId } });
+  if (existingMembership) {
+    return (
+      <Shell>
+        <p className="font-medium">You&apos;re already in a group.</p>
+        <p className="mt-2 text-sm text-muted">Leave your current group before joining another.</p>
+        <a href="/social" className="mt-3 inline-block text-sm text-accent hover:underline">
+          Back to Social
+        </a>
+      </Shell>
+    );
+  }
+
+  if (invite.group._count.members >= MAX_GROUP_SIZE) {
+    return (
+      <Shell>
+        <p className="font-medium">This group is full.</p>
+        <p className="mt-2 text-sm text-muted">Groups top out at {MAX_GROUP_SIZE} people.</p>
+      </Shell>
+    );
+  }
+
+  const creatorName = invite.creator.name ?? invite.creator.email ?? "Someone";
 
   const accept = async () => {
     "use server";
-    await respondToInvite(id, true);
-    redirect("/");
-  };
-
-  const decline = async () => {
-    "use server";
-    await respondToInvite(id, false);
-    redirect("/");
+    await joinGroup(id);
+    redirect("/social");
   };
 
   return (
@@ -81,27 +99,25 @@ export default async function InvitePage({
         <span className="relative inline-flex h-3 w-3 rounded-full bg-accent" />
       </span>
       <h1 className="mt-4 text-xl font-bold tracking-tight">
-        {requesterName} wants you as their accountability partner.
+        {creatorName} wants you in {invite.group.name}.
       </h1>
       <p className="mt-2 text-sm text-muted">
-        You&apos;ll each see whether the other completed their daily and weekly goals —
-        nothing more, and either of you can end it anytime.
+        Everyone in the group sees your daily and weekly goal completion — nothing more, and
+        you can leave anytime.
       </p>
       <div className="mt-6 flex justify-center gap-3">
-        <form action={decline}>
-          <button
-            type="submit"
-            className="rounded-full border border-border px-5 py-2.5 text-sm font-medium text-muted transition-colors hover:bg-surface-hover hover:text-foreground"
-          >
-            Decline
-          </button>
-        </form>
+        <a
+          href="/social"
+          className="rounded-full border border-border px-5 py-2.5 text-sm font-medium text-muted transition-colors hover:bg-surface-hover hover:text-foreground"
+        >
+          Not now
+        </a>
         <form action={accept}>
           <button
             type="submit"
             className="rounded-full bg-accent px-5 py-2.5 text-sm font-semibold text-accent-foreground shadow-[0_0_24px_-6px_var(--accent-glow)] hover:opacity-90"
           >
-            Accept
+            Join group
           </button>
         </form>
       </div>

@@ -6,7 +6,23 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { periodKeyFor, parseLocalDate, dayOfWeekIndex, todayKey } from "./dates";
 import { requireUserId } from "./auth";
+import { MAX_GROUP_SIZE } from "./group";
+import { getDailyStreak } from "./streak";
 import type { Recurrence } from "@prisma/client";
+
+const STREAK_MILESTONES = [7, 14, 30, 50, 100];
+
+async function notifyStreakMilestone(userId: string, streakCount: number) {
+  const memberships = await prisma.groupMembership.findMany({
+    where: { userId },
+    select: { groupId: true },
+  });
+  for (const m of memberships) {
+    await prisma.activity.create({
+      data: { groupId: m.groupId, userId, type: "STREAK_MILESTONE", payload: { streakCount } },
+    });
+  }
+}
 
 async function assertCategoryOwned(categoryId: string, userId: string) {
   const category = await prisma.category.findFirst({
@@ -14,6 +30,24 @@ async function assertCategoryOwned(categoryId: string, userId: string) {
     select: { id: true },
   });
   if (!category) throw new Error("Category not found");
+}
+
+// Group-goal-spawned personal Goals need a category (Goal.categoryId is
+// required); find-or-create a standing "Group" one rather than asking each
+// member to pick.
+async function ensureGroupCategory(userId: string): Promise<string> {
+  const existing = await prisma.category.findFirst({
+    where: { userId, name: "Group" },
+    select: { id: true },
+  });
+  if (existing) return existing.id;
+
+  const count = await prisma.category.count({ where: { userId } });
+  const created = await prisma.category.create({
+    data: { userId, name: "Group", color: "#818cf8", order: count },
+    select: { id: true },
+  });
+  return created.id;
 }
 
 // "1,3,5" -> [1,3,5]; ignores anything out of 0-6, dedupes, sorts. Only
@@ -109,7 +143,7 @@ export async function toggleCompletion(
 
   const goal = await prisma.goal.findFirst({
     where: { id: goalId, userId },
-    select: { id: true },
+    select: { id: true, groupGoalId: true },
   });
   if (!goal) return;
 
@@ -119,13 +153,70 @@ export async function toggleCompletion(
     where: { goalId_periodKey: { goalId, periodKey } },
   });
 
+  // Only DAILY completions can move the daily streak — skip the extra
+  // queries for WEEKLY/ONE_OFF toggles.
+  const streakBefore = recurrence === "DAILY" ? await getDailyStreak(userId) : null;
+
   if (existing) {
     await prisma.completion.delete({ where: { id: existing.id } });
   } else {
     await prisma.completion.create({ data: { goalId, periodKey, completed: true } });
   }
 
+  if (streakBefore !== null) {
+    const streakAfter = await getDailyStreak(userId);
+    if (streakAfter > streakBefore && STREAK_MILESTONES.includes(streakAfter)) {
+      await notifyStreakMilestone(userId, streakAfter);
+    }
+  }
+
+  if (goal.groupGoalId && !existing) {
+    await notifyIfGroupGoalComplete(goal.groupGoalId, periodKey, userId);
+  }
+
   revalidatePath("/");
+}
+
+// Fires GROUP_GOAL_COMPLETED once per period the moment every member's
+// linked goal is done — not on every toggle after that (guarded by
+// checking whether the activity already exists for this groupGoal+period).
+// Attributed to whoever's toggle was the one that completed it.
+async function notifyIfGroupGoalComplete(
+  groupGoalId: string,
+  periodKey: string,
+  completedByUserId: string
+) {
+  const groupGoal = await prisma.groupGoal.findUnique({ where: { id: groupGoalId } });
+  if (!groupGoal) return;
+
+  const memberGoals = await prisma.goal.findMany({
+    where: { groupGoalId, archivedAt: null },
+    include: { completions: { where: { periodKey, completed: true } } },
+  });
+  if (memberGoals.length === 0) return;
+  const allDone = memberGoals.every((g) => g.completions.length > 0);
+  if (!allDone) return;
+
+  const alreadyNotified = await prisma.activity.findFirst({
+    where: {
+      groupId: groupGoal.groupId,
+      type: "GROUP_GOAL_COMPLETED",
+      AND: [
+        { payload: { path: ["groupGoalId"], equals: groupGoalId } },
+        { payload: { path: ["periodKey"], equals: periodKey } },
+      ],
+    },
+  });
+  if (alreadyNotified) return;
+
+  await prisma.activity.create({
+    data: {
+      groupId: groupGoal.groupId,
+      userId: completedByUserId,
+      type: "GROUP_GOAL_COMPLETED",
+      payload: { groupGoalId, periodKey, goalTitle: groupGoal.title },
+    },
+  });
 }
 
 export type DayDetailGoal = {
@@ -261,78 +352,237 @@ export async function updateMilestone(formData: FormData) {
   revalidatePath("/");
 }
 
-// ---------- Partnership ----------
+// ---------- Groups ----------
 
-async function hasAcceptedPartnership(userId: string): Promise<boolean> {
-  const existing = await prisma.partnership.findFirst({
-    where: {
-      status: "ACCEPTED",
-      OR: [{ requesterId: userId }, { recipientId: userId }],
-    },
-    select: { id: true },
-  });
-  return existing !== null;
-}
-
-// Returns the invite id for building a shareable link. Idempotent: reuses an
-// existing unclaimed invite rather than minting a new one per click.
-export async function createInvite(): Promise<string> {
+// Idempotent: reuses an existing unclaimed invite rather than minting a new
+// one per click. Lazily creates the user's group on first call.
+export async function createGroupInvite(): Promise<string> {
   const userId = await requireUserId();
 
-  if (await hasAcceptedPartnership(userId)) {
-    throw new Error("You already have a partner.");
+  const existingMembership = await prisma.groupMembership.findFirst({
+    where: { userId },
+    select: { groupId: true },
+  });
+
+  let groupId: string;
+  if (existingMembership) {
+    groupId = existingMembership.groupId;
+  } else {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { name: true, email: true },
+    });
+    const group = await prisma.group.create({
+      data: {
+        name: `${user?.name ?? user?.email ?? "My"}'s Group`,
+        createdBy: userId,
+        members: { create: { userId } },
+      },
+      select: { id: true },
+    });
+    groupId = group.id;
   }
 
-  const existing = await prisma.partnership.findFirst({
-    where: { requesterId: userId, status: "PENDING", recipientId: null },
+  const memberCount = await prisma.groupMembership.count({ where: { groupId } });
+  if (memberCount >= MAX_GROUP_SIZE) {
+    throw new Error("This group is full.");
+  }
+
+  const existingInvite = await prisma.groupInvite.findFirst({
+    where: { groupId, usedBy: null },
     select: { id: true },
   });
-  if (existing) return existing.id;
+  if (existingInvite) return existingInvite.id;
 
-  const invite = await prisma.partnership.create({
-    data: { requesterId: userId },
+  const invite = await prisma.groupInvite.create({
+    data: { groupId, createdBy: userId },
     select: { id: true },
   });
   return invite.id;
 }
 
-export async function respondToInvite(partnershipId: string, accept: boolean) {
+export async function revokeGroupInvite(inviteId: string) {
   const userId = await requireUserId();
-
-  const invite = await prisma.partnership.findUnique({
-    where: { id: partnershipId },
-    select: { id: true, requesterId: true, recipientId: true, status: true },
-  });
-  if (!invite || invite.status !== "PENDING" || invite.recipientId !== null) return;
-  if (invite.requesterId === userId) return; // can't accept your own invite
-
-  if (accept && (await hasAcceptedPartnership(userId))) return;
-  if (accept && (await hasAcceptedPartnership(invite.requesterId))) return;
-
-  await prisma.partnership.update({
-    where: { id: partnershipId },
-    data: {
-      recipientId: userId,
-      status: accept ? "ACCEPTED" : "DECLINED",
-      respondedAt: new Date(),
-    },
-  });
-
-  revalidatePath("/");
+  await prisma.groupInvite.deleteMany({ where: { id: inviteId, createdBy: userId } });
+  revalidatePath("/social");
 }
 
-export async function removePartnership(partnershipId: string) {
+// Claims an invite: joins its group. No-ops (rather than throwing) on any
+// invalid state — the invite page reads the group/invite fresh afterward
+// and shows the right message either way.
+export async function joinGroup(inviteId: string) {
   const userId = await requireUserId();
 
-  // Either side can end it; also lets a requester revoke an unclaimed invite.
-  await prisma.partnership.deleteMany({
-    where: {
-      id: partnershipId,
-      OR: [{ requesterId: userId }, { recipientId: userId }],
-    },
+  const invite = await prisma.groupInvite.findUnique({
+    where: { id: inviteId },
+    select: { id: true, groupId: true, usedBy: true, createdBy: true },
+  });
+  if (!invite || invite.usedBy || invite.createdBy === userId) return;
+
+  const alreadyInAGroup = await prisma.groupMembership.findFirst({ where: { userId } });
+  if (alreadyInAGroup) return;
+
+  const memberCount = await prisma.groupMembership.count({ where: { groupId: invite.groupId } });
+  if (memberCount >= MAX_GROUP_SIZE) return;
+
+  await prisma.$transaction([
+    prisma.groupMembership.create({ data: { groupId: invite.groupId, userId } }),
+    prisma.groupInvite.update({ where: { id: inviteId }, data: { usedBy: userId } }),
+  ]);
+
+  await prisma.activity.create({
+    data: { groupId: invite.groupId, userId, type: "MEMBER_JOINED", payload: {} },
   });
 
+  // Backfill any group goals that already existed so the new member starts
+  // with the same shared checklist as everyone else.
+  const activeGroupGoals = await prisma.groupGoal.findMany({ where: { groupId: invite.groupId } });
+  if (activeGroupGoals.length > 0) {
+    const categoryId = await ensureGroupCategory(userId);
+    await prisma.goal.createMany({
+      data: activeGroupGoals.map((gg) => ({
+        userId,
+        categoryId,
+        title: gg.title,
+        recurrence: gg.recurrence,
+        daysOfWeek: gg.daysOfWeek,
+        groupGoalId: gg.id,
+      })),
+    });
+  }
+
   revalidatePath("/");
+  revalidatePath("/social");
+}
+
+export async function leaveGroup() {
+  const userId = await requireUserId();
+
+  const membership = await prisma.groupMembership.findFirst({
+    where: { userId },
+    select: { id: true, groupId: true },
+  });
+  if (!membership) return;
+
+  await prisma.groupMembership.delete({ where: { id: membership.id } });
+
+  const remaining = await prisma.groupMembership.count({ where: { groupId: membership.groupId } });
+  if (remaining === 0) {
+    await prisma.group.delete({ where: { id: membership.groupId } });
+  }
+
+  revalidatePath("/social");
+}
+
+const createGroupGoalSchema = z.object({
+  groupId: z.string().min(1),
+  title: z.string().trim().min(1).max(80),
+  recurrence: z.enum(["DAILY", "WEEKLY"]),
+  daysOfWeek: z.string().optional(),
+});
+
+export async function createGroupGoal(formData: FormData) {
+  const userId = await requireUserId();
+  const parsed = createGroupGoalSchema.parse({
+    groupId: formData.get("groupId"),
+    title: formData.get("title"),
+    recurrence: formData.get("recurrence"),
+    daysOfWeek: formData.get("daysOfWeek") || undefined,
+  });
+
+  const membership = await prisma.groupMembership.findUnique({
+    where: { groupId_userId: { groupId: parsed.groupId, userId } },
+  });
+  if (!membership) return;
+
+  const daysOfWeek = parsed.recurrence === "DAILY" ? parseDaysOfWeek(parsed.daysOfWeek) : [];
+
+  const groupGoal = await prisma.groupGoal.create({
+    data: { groupId: parsed.groupId, title: parsed.title, recurrence: parsed.recurrence, daysOfWeek },
+  });
+
+  const members = await prisma.groupMembership.findMany({
+    where: { groupId: parsed.groupId },
+    select: { userId: true },
+  });
+
+  for (const m of members) {
+    const categoryId = await ensureGroupCategory(m.userId);
+    await prisma.goal.create({
+      data: {
+        userId: m.userId,
+        categoryId,
+        title: parsed.title,
+        recurrence: parsed.recurrence,
+        daysOfWeek,
+        groupGoalId: groupGoal.id,
+      },
+    });
+  }
+
+  revalidatePath("/");
+  revalidatePath("/social");
+}
+
+const createChallengeSchema = z.object({
+  groupId: z.string().min(1),
+  title: z.string().trim().min(1).max(60),
+  startDate: z.string().min(1),
+  endDate: z.string().min(1),
+});
+
+export async function createChallenge(formData: FormData) {
+  const userId = await requireUserId();
+  const parsed = createChallengeSchema.parse({
+    groupId: formData.get("groupId"),
+    title: formData.get("title"),
+    startDate: formData.get("startDate"),
+    endDate: formData.get("endDate"),
+  });
+
+  const membership = await prisma.groupMembership.findUnique({
+    where: { groupId_userId: { groupId: parsed.groupId, userId } },
+  });
+  if (!membership) return;
+
+  const startDate = parseLocalDate(parsed.startDate);
+  const endDate = parseLocalDate(parsed.endDate);
+  if (endDate < startDate) return;
+
+  await prisma.challenge.create({
+    data: { groupId: parsed.groupId, title: parsed.title, startDate, endDate },
+  });
+
+  revalidatePath("/social");
+}
+
+const REACTION_EMOJI = ["🔥", "👏", "💪"];
+
+export async function toggleReaction(activityId: string, emoji: string) {
+  const userId = await requireUserId();
+  if (!REACTION_EMOJI.includes(emoji)) return;
+
+  const activity = await prisma.activity.findUnique({
+    where: { id: activityId },
+    select: { groupId: true },
+  });
+  if (!activity) return;
+
+  const membership = await prisma.groupMembership.findUnique({
+    where: { groupId_userId: { groupId: activity.groupId, userId } },
+  });
+  if (!membership) return;
+
+  const existing = await prisma.reaction.findUnique({
+    where: { activityId_userId_emoji: { activityId, userId, emoji } },
+  });
+  if (existing) {
+    await prisma.reaction.delete({ where: { id: existing.id } });
+  } else {
+    await prisma.reaction.create({ data: { activityId, userId, emoji } });
+  }
+
+  revalidatePath("/social");
 }
 
 // ---------- Onboarding ----------

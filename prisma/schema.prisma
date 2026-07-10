@@ -11,19 +11,21 @@ datasource db {
 // ---------- Auth.js (NextAuth v5) ----------
 
 model User {
-  id              String        @id @default(cuid())
-  name            String?
-  email           String?       @unique
-  emailVerified   DateTime?
-  image           String?
-  onboardedAt     DateTime?
-  accounts        Account[]
-  sessions        Session[]
-  categories      Category[]
-  goals           Goal[]
-  milestone       Milestone?
-  sentInvites     Partnership[] @relation("Requester")
-  receivedInvites Partnership[] @relation("Recipient")
+  id            String            @id @default(cuid())
+  name          String?
+  email         String?           @unique
+  emailVerified DateTime?
+  image         String?
+  onboardedAt   DateTime?
+  accounts      Account[]
+  sessions      Session[]
+  categories    Category[]
+  goals         Goal[]
+  milestone     Milestone?
+  memberships   GroupMembership[]
+  createdInvites GroupInvite[]
+  activities    Activity[]
+  reactions     Reaction[]
 }
 
 model Account {
@@ -99,6 +101,9 @@ model Goal {
   archivedAt   DateTime?
   createdAt    DateTime     @default(now())
   completions  Completion[]
+  // Set when this goal is a member's personal copy of a GroupGoal.
+  groupGoalId  String?
+  groupGoal    GroupGoal?   @relation(fields: [groupGoalId], references: [id], onDelete: SetNull)
 
   @@index([userId])
 }
@@ -114,26 +119,111 @@ model Completion {
   @@unique([goalId, periodKey])
 }
 
-enum PartnershipStatus {
-  PENDING
-  ACCEPTED
-  DECLINED
+// Accountability group, 2-8 members. A freshly created group sits at 1
+// member until the first invite is claimed. There's no separate "partner"
+// concept — a 2-person group is what a partner connection used to be.
+model Group {
+  id        String            @id @default(cuid())
+  name      String
+  createdAt DateTime          @default(now())
+  createdBy String
+  members    GroupMembership[]
+  invites    GroupInvite[]
+  activities Activity[]
+  groupGoals GroupGoal[]
+  challenges Challenge[]
 }
 
-// Accountability pairing. Created with a null recipient (a shareable invite
-// link); whoever opens the link while signed in can claim and accept it.
-model Partnership {
-  id          String            @id @default(cuid())
-  requesterId String
-  requester   User              @relation("Requester", fields: [requesterId], references: [id], onDelete: Cascade)
-  recipientId String?
-  recipient   User?             @relation("Recipient", fields: [recipientId], references: [id], onDelete: Cascade)
-  status      PartnershipStatus @default(PENDING)
-  createdAt   DateTime          @default(now())
-  respondedAt DateTime?
+// A time-boxed group event — its own countdown + a leaderboard scoped to
+// the window, independent of any member's personal Milestone/countdown.
+model Challenge {
+  id        String   @id @default(cuid())
+  groupId   String
+  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  title     String
+  startDate DateTime
+  endDate   DateTime
+  createdAt DateTime @default(now())
 
-  @@index([requesterId])
-  @@index([recipientId])
+  @@index([groupId])
+}
+
+// A goal template shared by a group. Creating one auto-creates a real
+// personal Goal for every current member (tagged via Goal.groupGoalId),
+// reusing the whole personal goal engine (streaks, heatmap, day-of-week
+// scheduling) instead of a parallel group-native completion system.
+model GroupGoal {
+  id          String     @id @default(cuid())
+  groupId     String
+  group       Group      @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  title       String
+  recurrence  Recurrence
+  daysOfWeek  Int[]      @default([])
+  createdAt   DateTime   @default(now())
+  memberGoals Goal[]
+
+  @@index([groupId])
+}
+
+model GroupMembership {
+  id       String   @id @default(cuid())
+  groupId  String
+  group    Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  userId   String
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  joinedAt DateTime @default(now())
+
+  @@unique([groupId, userId])
+  @@index([userId])
+}
+
+// Shareable invite link. Claimed on visit (see /invite/[id]) — usedBy is set
+// once someone joins through it so it can't be reused.
+model GroupInvite {
+  id        String    @id @default(cuid())
+  groupId   String
+  group     Group     @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  createdBy String
+  creator   User      @relation(fields: [createdBy], references: [id], onDelete: Cascade)
+  createdAt DateTime  @default(now())
+  usedBy    String?
+
+  @@index([groupId])
+}
+
+enum ActivityType {
+  STREAK_MILESTONE
+  GROUP_GOAL_COMPLETED
+  MEMBER_JOINED
+}
+
+// Curated feed events, not a raw completion log — generated only for
+// streak milestones, a group goal being fully completed, and members
+// joining. `payload` carries type-specific display data (e.g. streakCount).
+model Activity {
+  id        String       @id @default(cuid())
+  groupId   String
+  group     Group        @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      ActivityType
+  payload   Json
+  createdAt DateTime     @default(now())
+  reactions Reaction[]
+
+  @@index([groupId, createdAt])
+}
+
+model Reaction {
+  id         String   @id @default(cuid())
+  activityId String
+  activity   Activity @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  emoji      String
+  createdAt  DateTime @default(now())
+
+  @@unique([activityId, userId, emoji])
 }
 
 // One countdown per user.

@@ -14,7 +14,6 @@ import NewGoalModal from "@/components/NewGoalModal";
 import EmptyState from "@/components/EmptyState";
 import EditMilestoneModal from "@/components/EditMilestoneModal";
 import CategoryManagerModal from "@/components/CategoryManagerModal";
-import PartnerSection from "@/components/PartnerSection";
 import Heatmap from "@/components/Heatmap";
 
 export default async function HomePage() {
@@ -145,10 +144,6 @@ export default async function HomePage() {
             />
           </>
         )}
-      </div>
-
-      <div className="mt-10">
-        <PartnerSection userId={userId} />
       </div>
 
       <div className="mt-10">

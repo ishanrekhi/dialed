@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { auth, signOut } from "@/lib/auth";
+import NavTabs from "@/components/NavTabs";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -42,6 +43,7 @@ export default async function RootLayout({
             </a>
             {session?.user && (
               <div className="flex items-center gap-3">
+                <NavTabs />
                 <span className="hidden text-xs text-muted sm:inline">
                   {session.user.name ?? session.user.email}
                 </span>
